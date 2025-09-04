@@ -1,0 +1,995 @@
+import java.io.*;
+import java.util.*;
+import javax.crypto.*;
+import javax.crypto.spec.*;
+import java.security.*;
+import java.nio.*;
+import java.text.*;
+
+
+
+
+public class PasswordVault {
+   private Map <String, String> vault; // stores username-password pairs
+   private List <String> passwordList; // list of passwords (for display)
+   private Stack <String> actionHistory; // stack to keep track of actions
+   private String adminPassword; // admin password for verification
+
+
+
+
+   private final String adminpassword = "admin_password.txt"; // admin password file
+   private static final String userpasswords = "user_passwords.csv"; // user passwords file
+   private final String logfile = "vault_log.txt"; //action logs file
+
+
+
+
+   private final String saltfile = "salt.txt"; //salt file
+   private String salt = "salty";
+
+
+
+
+   private static final int iterations = 600000;
+   private static final int keylength = 128;
+   private SecretKeySpec secretKeySpec;
+
+
+
+
+   private List <String> wordList = new ArrayList <> ();
+
+
+
+
+   private final String vowels = "AEIOUaeiou";
+   private final String uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+   private final String lowercase = "abcdefghijklmnopqrstuvwxyz";
+   private final String numbers = "0123456789";
+   private final String symbols = "~!@#$%^&*()_+{}|:>\"<?`-=[]\\;',./";
+   private static String characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789~!@#$%^&*()_+{}|:>\"<?`-=[]\\;',./";
+
+
+
+
+   private static Scanner reader = new Scanner(System.in);
+
+
+
+
+   public PasswordVault() {
+       vault = new HashMap <> ();
+       passwordList = new ArrayList <> ();
+       actionHistory = new Stack <> ();
+       System.out.print("Enter master password: ");
+       String masterPassword = reader.nextLine();
+       loadSalt();
+       loadKey();
+       if (secretKeySpec == null) {
+           System.out.println("WARNING: Unable to load existing encryption data.");
+           System.out.println("Generating a new encryption key and salt will make any previously stored passwords inaccessible.");
+           System.out.print("Would you like to export passwords before reinitializing encryption? (Y/N): ");
+           if (reader.nextLine().equalsIgnoreCase("Y")) {
+               System.out.println("Please enter the file path.");
+               String filePath = reader.nextLine();
+               export (filePath);
+               System.out.println("Passwords have been exported to " + filePath);
+           }
+           System.out.print("Do you wish to proceed with a new encryption setup? (Y/N): ");
+           if (!reader.nextLine().equalsIgnoreCase("Y")) {
+               System.out.println("PasswordVault setup aborted. Please restore encryption data to retain access.");
+               return;
+           }
+           generateKey(masterPassword);
+           saveKey();
+       }
+       loadAdminPassword();
+       loadPasswordsFromCSV();
+   }
+
+
+
+
+   private void generateKey(String password) {
+       try {
+           PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt.getBytes(), iterations, keylength);
+           SecretKeyFactory keyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+           byte[] keyBytes = keyFactory.generateSecret(spec).getEncoded();
+           secretKeySpec = new SecretKeySpec(keyBytes, "AES");
+           logAction("AES key generated.");
+       } catch (Exception e) {
+           System.out.println("Error generating key: " + e.getMessage());
+       }
+   }
+
+
+
+
+   private void saveKey() {
+       FileOutputStream fos = null;
+       try {
+           fos = new FileOutputStream("key.dat");
+           fos.write(secretKeySpec.getEncoded());
+       } catch (IOException e) {
+           System.out.println("Error saving key: " + e.getMessage());
+       } finally {
+           if (fos != null) {
+               try {
+                   fos.close();
+               } catch (IOException e) {
+                   System.out.println("Failed to close FileOutputStream.");
+               }
+           }
+       }
+   }
+
+
+
+
+   private boolean loadKey() {
+       FileInputStream fis = null;
+       try {
+           fis = new FileInputStream("key.dat");
+           byte[] keyBytes = fis.readAllBytes();
+           if (keyBytes.length == 0) {
+               System.out.println("Key data is empty.");
+               return false;
+           }
+           secretKeySpec = new SecretKeySpec(keyBytes, "AES");
+           return true;
+       } catch (IOException e) {
+           System.out.println("No existing key found.");
+           return false;
+       } finally {
+           if (fis != null) {
+               try {
+                   fis.close();
+               } catch (IOException e) {
+                   System.out.println("Failed to close file input stream.");
+               }
+           }
+       }
+   }
+
+
+
+
+   private void saveSalt() {
+       PrintWriter pw = null;
+       try {
+           pw = new PrintWriter(new FileWriter(saltfile));
+           pw.println(salt);
+       } catch (IOException e) {
+           System.out.println("Error saving salt.");
+       } finally {
+           if (pw != null) {
+               pw.close();
+           }
+       }
+   }
+
+
+   private boolean loadSalt() {
+       BufferedReader br = null;
+       try {
+           br = new BufferedReader(new FileReader("salt.txt"));
+           salt = br.readLine();
+           if (salt == null || salt.isEmpty()) {
+               System.out.println("Invalid salt data. Generating a new salt.");
+               generateSalt();
+               saveSalt();
+               return false;
+           }
+           return true;
+       } catch (IOException e) {
+           System.out.println("No existing salt found, generating new one.");
+           generateSalt();
+           saveSalt();
+           return false;
+       } finally {
+           if (br != null) {
+               try {
+                   br.close();
+               } catch (IOException e) {
+                   System.out.println("Failed to close BufferedReader.");
+               }
+           }
+       }
+   }
+
+
+
+
+   private void generateSalt() {
+       byte[] saltBytes = new byte[16];
+       new SecureRandom().nextBytes(saltBytes);
+       salt = Base64.getEncoder().encodeToString(saltBytes);
+   }
+
+
+
+
+   public String getSalt() {
+       return salt;
+   }
+
+
+
+
+   public byte[] getAESKey() {
+       if (secretKeySpec != null) {
+           return secretKeySpec.getEncoded();
+       }
+       return null;
+   }
+
+
+   private void loadAdminPassword() {
+       FileReader fr = null;
+       try {
+           fr = new FileReader(adminpassword);
+           StringBuilder sb = new StringBuilder();
+           int c;
+           while ((c = fr.read()) != -1) {
+               sb.append((char) c);
+           }
+           adminPassword = sb.toString().trim();
+       } catch (IOException e) {
+           adminPassword = "admin"; // default
+       } finally {
+           if (fr != null) {
+               try {
+                   fr.close();
+               } catch (IOException e) {
+                   System.out.println("Failed to close FileReader.");
+               }
+           }
+       }
+   }
+
+
+   private void saveAdminPassword() {
+       PrintWriter pw = null;
+       try {
+           pw = new PrintWriter(new FileWriter(adminpassword));
+           pw.println(adminPassword);
+       } catch (IOException e) {
+           System.out.println("Error saving admin password.");
+       } finally {
+           if (pw != null) {
+               pw.close();
+           }
+       }
+   }
+
+
+   public String getAdminPassword() {
+       return adminPassword;
+   }
+
+
+
+
+   private void loadPasswordsFromCSV() {
+       if (secretKeySpec == null) {
+           System.out.println("No valid key available. Cannot decrypt existing passwords.");
+           return;
+       }
+       BufferedReader br = null;
+       try {
+           br = new BufferedReader(new FileReader(userpasswords));
+           String line;
+           while ((line = br.readLine()) != null) {
+               String[] parts = line.split(",");
+               if (parts.length == 2) {
+                   String username = parts[0];
+                   String encryptedPassword = parts[1];
+                   String password = decrypt(encryptedPassword);
+                   if (password != null) {
+                       vault.put(username, password);
+                       passwordList.add(password);
+                   } else {
+                       System.out.println("WARNING: Could not decrypt password for user: " + username);
+                   }
+               }
+           }
+       } catch (IOException e) {
+       } finally {
+           if (br != null) {
+               try {
+                   br.close();
+               } catch (IOException e) {
+                   System.out.println("Failed to close BufferedReader.");
+               }
+           }
+       }
+   }
+
+
+
+
+   public static void export (String filePath) {
+       BufferedReader csvReader = null;
+       BufferedWriter writer = null;
+       try {
+           csvReader = new BufferedReader(new FileReader(userpasswords));
+           writer = new BufferedWriter(new FileWriter(filePath));
+           String row;
+           writer.write("Username\t\t\t\t\t\t\t\tPassword");
+           writer.newLine();
+           while ((row = csvReader.readLine()) != null) {
+               String[] data = row.split(",");
+               if (data.length >= 2) {
+                   String username = data[0].trim();
+                   String password = data[1].trim();
+                   writer.write(username + "\t\t\t\t\t\t\t\t" + password);
+                   writer.newLine();
+               }
+           }
+           System.out.println("Export successful. File saved at: " + filePath);
+
+
+       } catch (IOException e) {
+           System.out.println("An error occurred while exporting: " + e.getMessage());
+       } finally {
+           // Close the resources in the finally block
+           try {
+               if (csvReader != null) {
+                   csvReader.close();
+               }
+               if (writer != null) {
+                   writer.close();
+               }
+           } catch (IOException e) {
+               System.out.println("Failed to close resources.");
+           }
+       }
+   }
+
+
+
+
+   private void savePasswordsToCSV() {
+       PrintWriter pw = null;
+       try {
+           pw = new PrintWriter(new FileWriter(userpasswords));
+           for (String key: vault.keySet()) {
+               String value = vault.get(key);
+               if (value != null) {
+                   pw.println(key + "," + encrypt(value));
+               } else {
+                   System.out.println("WARNING: Skipping password for user " + key + " (null).");
+               }
+           }
+       } catch (IOException e) {
+           System.out.println("Error saving passwords to CSV.");
+       } finally {
+           if (pw != null) {
+               pw.close();
+           }
+       }
+   }
+
+
+
+
+   private String checkPasswordStrength(String password) {
+       int length = password.length();
+       boolean hasUpper = false;
+       boolean hasLower = false;
+       boolean hasNumber = false;
+       boolean hasSpecial = false;
+       for (int i = 0; i < length; i++) {
+           char c = password.charAt(i);
+           if (uppercase.indexOf(c) >= 0) {
+               hasUpper = true;
+           } else if (lowercase.indexOf(c) >= 0) {
+               hasLower = true;
+           } else if (numbers.indexOf(c) >= 0) {
+               hasNumber = true;
+           } else if (symbols.indexOf(c) >= 0) {
+               hasSpecial = true;
+           }
+       }
+       if ((length >= 12 && hasUpper && hasLower && hasNumber && hasSpecial) || (length >= 30)) {
+           return "Strong";
+       } else if (length >= 8 && (hasUpper || hasLower) && hasNumber) {
+           return "Moderate";
+       } else {
+           return "Weak";
+       }
+   }
+
+
+
+
+   public void addPassword(String username) {
+       if (username == null) {
+           System.out.println("Username cannot be null.");
+           return;
+       }
+       StringBuilder password = new StringBuilder();
+       System.out.println("Enter password character by character. Type '-' to delete the last character. Press Enter when done.");
+       System.out.println();
+       while (true) {
+           System.out.print("\033[1F\033[K");
+           System.out.print("\rPassword: " + password + " | Strength: " + checkPasswordStrength(password.toString()) + " | Input: ");
+           String input = reader.nextLine();
+           if (input.equals("-")) {
+               if (password.length() > 0) {
+                   password.setLength(password.length() - 1);
+               }
+           } else if (input.isEmpty()) {
+               break;
+           } else {
+               password.append(input);
+           }
+       }
+       String finalPassword = password.toString();
+       vault.put(username, finalPassword);
+       passwordList.add(finalPassword);
+       actionHistory.push("ADD," + username + "," + finalPassword);
+       savePasswordsToCSV();
+       System.out.println("\nPassword added for user: " + username);
+       logAction("Added password for user: " + username);
+   }
+
+
+
+
+   public void addTestPassword(String username, String password) {
+       vault.put(username, password);
+       passwordList.add(password);
+       savePasswordsToCSV();
+   }
+
+
+
+
+   public void removePassword(String username) {
+       if (username == null) {
+           System.out.println("Username cannot be null.");
+           return;
+       }
+       if (vault.containsKey(username)) {
+           System.out.println("Enter the password for user: " + username);
+           String inputPassword = reader.nextLine();
+           String actualPassword = vault.get(username);
+           if (actualPassword == null) {
+               System.out.println("No password found for user: " + username);
+               return;
+           }
+           if (!actualPassword.equals(inputPassword)) {
+               System.out.println("Incorrect password.");
+               return;
+           }
+           vault.remove(username);
+           passwordList.remove(actualPassword);
+           actionHistory.push("REMOVE," + username + "," + actualPassword);
+           savePasswordsToCSV();
+           System.out.println("Password removed for user: " + username);
+       } else {
+           System.out.println("No password found for user: " + username);
+       }
+       logAction("Removed password for user: " + username);
+   }
+
+
+
+
+   public String generateRandomPassword() {
+       loadWordsFromFile("words_alpha.txt");
+       System.out.println("Would you like to generate a (1) password or a (2) passphrase?");
+       String choice = reader.nextLine();
+       if (choice.equals("1")) {
+           return generatePassword();
+       } else if (choice.equals("2")) {
+           System.out.println("(Y/N) Would you like to use a specific acronym?");
+           String choice1 = reader.nextLine();
+           if (choice1.equalsIgnoreCase("Y")) {
+               return acronymPassphrase();
+           } else {
+               return generatePassphrase();
+           }
+       } else {
+           System.out.println("Invalid choice. Please enter 1 for password or 2 for passphrase.");
+           return generateRandomPassword();
+       }
+   }
+
+
+
+
+   private void loadWordsFromFile(String filePath) {
+       BufferedReader reader = null;
+       try {
+           reader = new BufferedReader(new FileReader(filePath));
+           String line;
+           while ((line = reader.readLine()) != null) {
+               line = line.trim().toLowerCase();
+               if (isValidWord(line)) {
+                   wordList.add(line);
+               }
+           }
+       } catch (IOException e) {
+           System.out.println("Error reading word list from file: " + e.getMessage());
+       } finally {
+           if (reader != null) {
+               try {
+                   reader.close();
+               } catch (IOException e) {
+                   System.out.println("Failed to close BufferedReader.");
+               }
+           }
+       }
+   }
+
+
+
+
+   private boolean isSingleLetterWord(String word) {
+       if (word.length() == 1) {
+           return true;
+       }
+       char firstChar = word.charAt(0);
+       for (int i = 1; i < word.length(); i++) {
+           if (word.charAt(i) != firstChar) {
+               return false;
+           }
+       }
+       return true;
+   }
+
+
+
+
+   private boolean isValidWord(String word) {
+       if (word.length() < 3 || word.length() > 6) {
+           return false;
+       }
+       for (int i = 0; i < word.length(); i++) {
+           char c = word.charAt(i);
+           if (uppercase.indexOf(c) == -1 && lowercase.indexOf(c) == -1) {
+               return false;
+           }
+       }
+       return containsVowel(word) && !isSingleLetterWord(word);
+   }
+
+
+
+
+   private boolean containsVowel(String word) {
+       for (int i = 0; i < word.length(); i++) {
+           char c = word.charAt(i);
+           if (vowels.indexOf(c) != -1) {
+               return true;
+           }
+       }
+
+
+       return false;
+   }
+
+
+
+
+   private String generatePassphrase() {
+       System.out.println("How many words should the passphrase contain?");
+       int wordCount = getLength();
+       Random random = new Random();
+       StringBuilder passphrase = new StringBuilder();
+       for (int i = 0; i < wordCount; i++) {
+           if (i > 0) {
+               passphrase.append("-");
+           }
+           passphrase.append(wordList.get(random.nextInt(wordList.size())));
+       }
+       logAction("Random passphrase generated.");
+       return passphrase.toString();
+   }
+
+
+
+
+   private String acronymPassphrase() {
+       System.out.println("How many words should the passphrase contain?");
+       int wordCount = getLength();
+       System.out.println("Please enter the acronym.");
+       String acronym = reader.nextLine();
+       String[] letters = acronym.split("");
+       Random random = new Random();
+       StringBuilder passphrase = new StringBuilder();
+       if (letters.length != wordCount) {
+           System.out.println("Acronym length does match passphrase length. Operation aborted.");
+       }
+       for (int i = 0; i < wordCount; i++) {
+           String append;
+           if (i > 0) {
+               passphrase.append("-");
+           }
+           do {
+               append = wordList.get(random.nextInt(wordList.size()));
+           } while (!((String.valueOf(append.charAt(0)).equalsIgnoreCase(letters[i]))));
+           passphrase.append(append);
+       }
+       logAction("Random passphrase generated.");
+       return passphrase.toString();
+   }
+
+
+
+
+   private String generatePassword() {
+       StringBuilder allCharacterPool = new StringBuilder();
+       List < Character > requiredCharacters = new ArrayList < > ();
+       Random random = new Random();
+       System.out.print("Include uppercase letters? (Y/N): ");
+       if (reader.nextLine().equalsIgnoreCase("Y")) {
+           allCharacterPool.append(uppercase);
+           requiredCharacters.add(randomCharFrom(uppercase));
+       }
+       System.out.print("Include lowercase letters? (Y/N): ");
+       if (reader.nextLine().equalsIgnoreCase("Y")) {
+           allCharacterPool.append(lowercase);
+           requiredCharacters.add(randomCharFrom(lowercase));
+       }
+       System.out.print("Include numbers? (Y/N): ");
+       if (reader.nextLine().equalsIgnoreCase("Y")) {
+           allCharacterPool.append(numbers);
+           requiredCharacters.add(randomCharFrom(numbers));
+       }
+       System.out.print("Include symbols? (Y/N): ");
+       if (reader.nextLine().equalsIgnoreCase("Y")) {
+           allCharacterPool.append(symbols);
+           requiredCharacters.add(randomCharFrom(symbols));
+       }
+       if (allCharacterPool.length() == 0) {
+           System.out.println("Please select at least one character type.");
+           return "";
+       }
+       System.out.print("Enter the desired password length: ");
+       int length = reader.nextInt();
+       if (length < requiredCharacters.size()) {
+           System.out.println("Password length is too short to include all specified character types.");
+           return "";
+       }
+       StringBuilder password = new StringBuilder(length);
+       for (char c: requiredCharacters) {
+           password.append(c);
+       }
+       for (int i = requiredCharacters.size(); i < length; i++) {
+           int index = random.nextInt(allCharacterPool.length());
+           password.append(allCharacterPool.charAt(index));
+       }
+       return shuffle(password.toString(), random);
+   }
+
+
+
+
+private String testPassword() {
+       Random random = new Random();
+       StringBuilder password = new StringBuilder();
+       for (int i = 0; i < random.nextInt(15) + 5; i++) {
+           password.append(characters.charAt(random.nextInt(characters.length())));
+       }
+       return password.toString();
+   }
+
+
+   private static char randomCharFrom(String characters) {
+       Random random = new Random();
+       return characters.charAt(random.nextInt(characters.length()));
+   }
+
+
+
+
+   private static String shuffle(String input, Random random) {
+       List < Character > characters = new ArrayList < > ();
+       for (char c: input.toCharArray()) {
+           characters.add(c);
+       }
+       StringBuilder shuffled = new StringBuilder(input.length());
+       while (!characters.isEmpty()) {
+           int randIndex = random.nextInt(characters.size());
+           shuffled.append(characters.remove(randIndex));
+       }
+       return shuffled.toString();
+   }
+
+
+
+
+   private int getLength() {
+       int length = 0;
+       while (true) {
+           try {
+               length = Integer.parseInt(reader.nextLine());
+               if (length > 0) {
+                   break;
+               } else {
+                   System.out.println("Please enter a positive integer.");
+               }
+           } catch (NumberFormatException e) {
+               System.out.println("Invalid input. Please enter a positive integer.");
+           }
+       }
+       return length;
+   }
+
+
+
+
+   public void displayAllPasswords(String adminPassword) {
+       if (this.adminPassword != null && this.adminPassword.equals(adminPassword)) {
+           System.out.println("All stored passwords:");
+           for (String username: vault.keySet()) {
+               String password = vault.get(username);
+               if (password != null) {
+                   System.out.println("Username: " + username + ", Password: " + password);
+               } else {
+                   System.out.println("Username: " + username + ", Password: null");
+               }
+           }
+           logAction("All passwords displayed.");
+       } else {
+           System.out.println("Invalid admin password.");
+       }
+   }
+
+
+
+
+   public void searchPasswordByUsername() {
+       System.out.print("Enter admin password to search for a username: ");
+       String inputAdminPassword = reader.nextLine();
+       if (this.adminPassword != null && this.adminPassword.equals(inputAdminPassword)) {
+           System.out.print("Enter username to search: ");
+           String username = reader.nextLine();
+           if (vault.containsKey(username)) {
+               String password = vault.get(username);
+               if (password != null) {
+                   System.out.println("Username: " + username + ", Password: " + password);
+               } else {
+                   System.out.println("Username: " + username + ", Password: null");
+               }
+               logAction("Password viewed for user: " + username);
+           } else {
+               System.out.println("No password found for the given username.");
+           }
+       } else {
+           System.out.println("Invalid admin password. Access denied.");
+       }
+   }
+
+
+
+
+   public void setAdminPassword(String currentPassword) {
+       if (this.adminPassword != null && this.adminPassword.equals(currentPassword)) {
+           System.out.print("Enter new admin password: ");
+           String newAdminPassword = reader.nextLine();
+           this.adminPassword = newAdminPassword;
+           saveAdminPassword();
+           System.out.println("Admin password set.");
+           logAction("Admin password changed successfully.");
+       } else {
+           System.out.println("Current admin password is incorrect.");
+       }
+   }
+
+
+
+
+   public void undoLastAction() {
+       if (actionHistory.isEmpty()) {
+           System.out.println("Nothing to undo.");
+           return;
+       }
+       String lastAction = actionHistory.pop();
+       String[] parts = lastAction.split(",");
+       if (parts.length < 3) {
+           System.out.println("Invalid action format. Cannot undo: " + lastAction);
+           actionHistory.push(lastAction);
+           return;
+       }
+       String actionType = parts[0];
+       String username = parts[1];
+       String password = parts[2];
+       if ("ADD".equals(actionType)) {
+           vault.remove(username);
+           passwordList.remove(password);
+           System.out.println("Undid add action for user: " + username);
+       } else if ("REMOVE".equals(actionType)) {
+           vault.put(username, password);
+           passwordList.add(password);
+           System.out.println("Undid remove action for user: " + username);
+       }
+       savePasswordsToCSV();
+       logAction("Undid last action: " + parts[0] + " " + parts[1]);
+   }
+
+
+
+
+   private String encrypt(String data) {
+       try {
+           SecureRandom random = new SecureRandom();
+           Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+           byte[] iv = new byte[cipher.getBlockSize()];
+           random.nextBytes(iv);
+           IvParameterSpec ivSpec = new IvParameterSpec(iv);
+           cipher.init(Cipher.ENCRYPT_MODE, secretKeySpec, ivSpec);
+           byte[] encrypted = cipher.doFinal(data.getBytes());
+           ByteBuffer buffer = ByteBuffer.allocate(iv.length + encrypted.length);
+           buffer.put(iv);
+           buffer.put(encrypted);
+           return Base64.getEncoder().encodeToString(buffer.array());
+       } catch (Exception e) {
+           System.out.println("Encryption error: " + e.getMessage());
+           return null;
+       }
+   }
+
+
+
+
+   private String decrypt(String encryptedData) {
+       try {
+           Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+           byte[] encryptedBytes = Base64.getDecoder().decode(encryptedData);
+           ByteBuffer buffer = ByteBuffer.wrap(encryptedBytes);
+           byte[] iv = new byte[cipher.getBlockSize()];
+           buffer.get(iv);
+           byte[] encrypted = new byte[buffer.remaining()];
+           buffer.get(encrypted);
+           IvParameterSpec ivSpec = new IvParameterSpec(iv);
+           cipher.init(Cipher.DECRYPT_MODE, secretKeySpec, ivSpec);
+           byte[] decrypted = cipher.doFinal(encrypted);
+           return new String(decrypted);
+       } catch (Exception e) {
+           System.out.println("Decryption error: " + e.getMessage());
+           return null;
+       }
+   }
+   public static void main(String[] args) {
+       PasswordVault passwordVault = new PasswordVault();
+       int choice = -1;
+       System.out.println("Enter test mode? (Y/N)");
+       String test = reader.nextLine();
+       if (test.equalsIgnoreCase("Y")) {
+           Random random = new Random();
+           for (int i = 0; i < 50; i++) {
+               StringBuilder username = new StringBuilder("user");
+               for (int j = 0; j < 5; j++) {
+                   username.append(characters.charAt(random.nextInt(characters.length())));
+               }
+               String password = passwordVault.testPassword();
+               passwordVault.addTestPassword(username.toString(), password);
+           }
+       }
+       do {
+           System.out.println();
+           System.out.println("---- Menu ----");
+           System.out.println();
+           System.out.println("1. Add/Change Password");
+           System.out.println("2. Remove Password");
+           System.out.println("3. Generate Random Password");
+           System.out.println("4. Display All Passwords");
+           System.out.println("5. Set Administrator Password");
+           System.out.println("6. Undo Last Action");
+           System.out.println("7. Search Passwords By Username");
+           System.out.println("8. View Logs");
+           System.out.println("9. Export passwords");
+           System.out.println("10. Exit Program");
+           System.out.println();
+           System.out.print("Choose an option: ");
+           try {
+               choice = reader.nextInt();
+               reader.nextLine();
+               switch (choice) {
+                   case 1:
+                       System.out.print("Enter username: ");
+                       String username = reader.nextLine();
+                       passwordVault.addPassword(username);
+                       break;
+                   case 2:
+                       System.out.print("Enter username to remove: ");
+                       String removeUser = reader.nextLine();
+                       passwordVault.removePassword(removeUser);
+                       break;
+                   case 3:
+                       String generatedPassword = passwordVault.generateRandomPassword();
+                       System.out.println("Generated Password: " + generatedPassword);
+                       break;
+                   case 4:
+                       System.out.print("Enter admin password to view all passwords: ");
+                       String adminPassInput = reader.nextLine();
+                       passwordVault.displayAllPasswords(adminPassInput);
+                       break;
+                   case 5:
+                       System.out.print("Enter current admin password: ");
+                       String currentAdminPass = reader.nextLine();
+                       passwordVault.setAdminPassword(currentAdminPass);
+                       break;
+                   case 6:
+                       passwordVault.undoLastAction();
+                       break;
+                   case 7:
+                       passwordVault.searchPasswordByUsername();
+                       break;
+                   case 8:
+                       System.out.print("Enter admin password to view logs: ");
+                       String logAdminPass = reader.nextLine();
+                       passwordVault.viewLogs(logAdminPass);
+                       break;
+                   case 9:
+                       System.out.println("Enter the file path.");
+                       String filePath = reader.nextLine();
+                       export (filePath);
+                       break;
+                   case 10:
+                       System.out.println("Program exited.");
+                       passwordVault.savePasswordsToCSV();
+                       break;
+                   case 99:
+                       System.out.print("\033c"); //clear screen discreetly
+                       System.out.flush();
+                       break;
+                   default:
+                       System.out.println("Invalid option. Please try again.");
+                       break;
+               }
+           } catch (InputMismatchException e) {
+               System.out.println("Invalid input. Please enter a number.");
+               reader.nextLine();
+           }
+       } while (choice != 10);
+       reader.close();
+   }
+
+
+
+
+   private void logAction(String action) {
+       String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date());
+       PrintWriter pw = null;
+       try {
+           pw = new PrintWriter(new FileWriter(logfile, true));
+           pw.println("[" + timestamp + "] " + action);
+       } catch (IOException e) {
+           System.out.println("Error logging action: " + e.getMessage());
+       } finally {
+           if (pw != null) {
+               pw.close();
+           }
+       }
+   }
+
+
+
+
+   public void viewLogs(String inputAdminPassword) {
+       if (this.adminPassword != null && this.adminPassword.equals(inputAdminPassword)) {
+           System.out.println("---- Log History ----");
+           try (BufferedReader br = new BufferedReader(new FileReader(logfile))) {
+               String line;
+               while ((line = br.readLine()) != null) {
+                   System.out.println(line);
+               }
+           } catch (IOException e) {
+               System.out.println("Error reading log file: " + e.getMessage());
+           }
+           logAction("Action logs viewed.");
+       } else {
+           System.out.println("Invalid admin password. Access denied.");
+       }
+   }
+}
+
+
+
+
