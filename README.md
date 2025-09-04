@@ -1,2 +1,4 @@
 # basic-password-manager
-utilize javax.crypto, AES encryption, and hashing to create a functional password manager
+Utilizes javax.crypto, AES encryption, and hashing in a functional password manager.
+
+
